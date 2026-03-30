@@ -1,4 +1,5 @@
 from typing import Optional
+import heapq
 
 
 class ParserError(Exception):
@@ -60,7 +61,6 @@ class Zone:
         self.connections = []
 
     def zone_metadata(self) -> None:
-        print(self.metadata)
         # i want to set default values for all the metadata keys,
         # and then override them with the values from the input
         # warmimg: only 4 types of "zone" are allowed:
@@ -97,6 +97,8 @@ class Drone:
         self.current_zone: Optional[Zone] = None
         self.path = []
         self.waiting = 0
+        self.destination_zone: Optional[Zone] = None
+        self.turns_to_arrive = 0
 
 
 class Field:
@@ -187,6 +189,8 @@ class Field:
 
             for connection in current_zone.connections:
                 neighbor = connection.get_other_zone(current_zone)
+                if neighbor.metadata["zone"] == "blocked":
+                    continue
                 stack.append(neighbor)
         if not path:
             raise ParserError("No valid path from start to end")
@@ -197,25 +201,91 @@ class Field:
             possible_connections.append(connection)
         return possible_connections
 
+    def _entry_turn_cost(self, zone: "Zone") -> int:
+        # custo para ENTRAR numa zona
+        if zone.zone_type == "blocked":
+            return 10**9  # efetivamente impossível
+        if zone.zone_type == "restricted":
+            return 2  # 1 turno de espera + 1 de avanço
+        return 1      # normal / priority
+
+    def _heuristic(self, zone: "Zone", end_zone: "Zone") -> int:
+        """
+        Heurística admissível (Manhattan) com custo mínimo por passo = 1.
+        """
+        return abs(zone.x - end_zone.x) + abs(zone.y - end_zone.y)
+
     def find_shortest_path(
         self,
         start_zone: Zone,
         end_zone: Zone,
     ) -> Optional[list[Zone]]:
-        """BFS para encontrar caminho mais curto de start a end"""
-        queue = [(start_zone, [start_zone])]
-        visited = {start_zone}
+        """
+        A*:
+        1) Minimiza turnos totais (g)
+        2) Em empate, prefere mais zonas priority
+        """
+        if start_zone == end_zone:
+            return [start_zone]
 
-        while queue:
-            current, path = queue.pop(0)
+        tie = 0
+
+        # custos conhecidos
+        g_score: dict[Zone, int] = {start_zone: 0}
+        neg_prio_score: dict[Zone, int] = {start_zone: 0}  # mais priority => menor valor
+
+        # para reconstruir caminho
+        came_from: dict[Zone, Zone] = {}
+
+        # heap: (f, g, -priority_count, tie, current_zone)
+        open_heap: list[tuple[int, int, int, int, Zone]] = []
+        f0 = self._heuristic(start_zone, end_zone)
+        heapq.heappush(open_heap, (f0, 0, 0, tie, start_zone))
+
+        while open_heap:
+            f, g, neg_prio, _, current = heapq.heappop(open_heap)
+
+            # ignora entrada antiga (stale)
+            if g != g_score.get(current, float("inf")):
+                continue
+            if neg_prio != neg_prio_score.get(current, float("inf")):
+                continue
+
             if current == end_zone:
+                # reconstruir caminho
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
                 return path
 
             for connection in current.connections:
                 neighbor = connection.get_other_zone(current)
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, path + [neighbor]))
+                if neighbor.zone_type == "blocked":
+                    continue
+
+                step_cost = self._entry_turn_cost(neighbor)
+                tentative_g = g + step_cost
+                tentative_neg_prio = neg_prio - (
+                    1 if neighbor.zone_type == "priority" else 0
+                )
+
+                old_g = g_score.get(neighbor, float("inf"))
+                old_neg_prio = neg_prio_score.get(neighbor, float("inf"))
+
+                # melhor se menor custo; em empate, mais priority
+                if (tentative_g, tentative_neg_prio) < (old_g, old_neg_prio):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    neg_prio_score[neighbor] = tentative_neg_prio
+                    tie += 1
+                    new_f = tentative_g + self._heuristic(neighbor, end_zone)
+                    heapq.heappush(
+                        open_heap,
+                        (new_f, tentative_g, tentative_neg_prio,
+                         tie, neighbor),
+                    )
 
         return None
 
@@ -226,41 +296,63 @@ class Field:
 
         while any(not d.finished for d in self.drones):
             turn += 1
-            moves = []  # (drone, next_zone)
+            print(f"Turn {turn}: ", end="")
 
-            for drone in self.drones:
-                if drone.finished:
+            # 1. Drones que estavam em trânsito avançam
+            for d in self.drones:
+                if d.turns_to_arrive > 0:
+                    d.turns_to_arrive -= 1
+                    if d.turns_to_arrive == 0:
+                        d.current_zone = d.destination_zone
+                        if d.current_zone == end_zone:
+                            d.finished = True
+
+            # 2. Mapear ocupação ATUAL (apenas quem já está fisicamente na zona)
+            occupancy = {z: 0 for z in self.zones}
+            for d in self.drones:
+                if d.started and not d.finished and d.turns_to_arrive == 0:
+                    occupancy[d.current_zone] += 1
+
+            # 3. Processar intenção de movimento
+            for d in self.drones:
+                if d.finished or d.turns_to_arrive > 0:
                     continue
 
-                # Começar no start
-                if not drone.started:
-                    drone.started = True
-                    drone.current_zone = start_zone
-                    moves.append((drone, start_zone))
-                    break
-                else:
-                    # Mover para próximo passo do caminho
-                    path = self.find_shortest_path(drone.current_zone,
-                                                   end_zone)
-                    if path and len(path) > 1:
-                        next_zone = path[1]
-                        if next_zone.zone_type == "restricted":
-                            if not drone.waiting:
-                                drone.waiting += 1
-                                continue
-                        if drone.waiting:
-                            drone.waiting -= 1
-                        moves.append((drone, next_zone))
-                        drone.current_zone = next_zone
+                if not d.started:
+                    # Lógica de entrada no sistema (Start Hub)
+                    max_start = start_zone.metadata.get("max_drones", 1)
+                    if occupancy[start_zone] < max_start:
+                        d.started = True
+                        d.current_zone = start_zone
+                        occupancy[start_zone] += 1
+                        print(f"D{d.id}->{start_zone.name} ", end="")
+                    continue
 
-                        # Verificar se chegou
-                        if drone.current_zone == end_zone:
-                            drone.finished = True
+                # Planejar próximo passo usando A*
+                path = self.find_shortest_path(d.current_zone, end_zone)
+                if path and len(path) > 1:
+                    next_zone = path[1]
 
-            # Imprimir turno
-            print(f"Turn {turn}: ", end="")
-            for drone, zone in moves:
-                print(f"D{drone.id}->{zone.name} ", end="")
+                    # Regra VII.3: Drones saindo liberam capacidade no mesmo turno
+                    # Como processamos um por um, subtraímos quem está saindo
+                    max_cap = next_zone.metadata.get("max_drones", 1)
+
+                    if occupancy[next_zone] < max_cap:
+                        # Executa movimento
+                        cost = self._entry_turn_cost(next_zone)
+                        occupancy[d.current_zone] -= 1  # Libera a atual
+
+                        if cost > 1:  # Zona Restrita (2 turnos)
+                            d.destination_zone = next_zone
+                            d.turns_to_arrive = cost - 1  # Fica em trânsito
+                            d.current_zone = None  # Ocupa a "conexão", não a zona
+                        else:
+                            d.current_zone = next_zone
+                            occupancy[next_zone] += 1
+                            if d.current_zone == end_zone:
+                                d.finished = True
+
+                        print(f"D{d.id}->{next_zone.name} ", end="")
             print()
 
 
@@ -271,16 +363,6 @@ try:
     for zone in a.zones:
         zone.zone_metadata()
     a.verify_connection()
-
     a.simulate_turns()
-    # for drone in a.drones:
-    #     print(
-    #         f"Drone {drone.id} started: {drone.started}, " +
-    #         f"finished: {drone.finished}, " +
-    #         f"current zone: {drone.current_zone.name}"
-    #     )
-    # print every zone_type
-    for zone in a.zones:
-        print(f"Zone {zone.name} type: {zone.zone_type}")
 except ParserError as e:
     print(f"Parser Error: {e}")
