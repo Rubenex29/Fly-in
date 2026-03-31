@@ -5,7 +5,7 @@ install:
 	python3 -m pip install flake8 mypy
 
 run:
-	python3 parser.py
+	python3 Fly-in.py
 
 debug:
 	python3 -m pdb parser.py
