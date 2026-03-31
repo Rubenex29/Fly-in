@@ -215,6 +215,35 @@ class Field:
             return 2  # 1 turn waiting + 1 moving forward
         return 1      # normal / priority
 
+    def _traffic_penalty(self, zone: "Zone", traffic: dict[str, int]) -> int:
+        """
+        Dynamic congestion penalty:
+        - considers occupancy pressure (`traffic`) versus zone capacity
+        - escalates sharply when expected demand exceeds capacity
+        - biases away from restricted zones and slightly towards priority zones
+        """
+        pressure = traffic.get(zone.name, 0)
+
+        max_cap: int | float = 1
+        if isinstance(zone.metadata, dict):
+            max_cap = zone.metadata.get("max_drones", 1)
+        if max_cap != float("inf"):
+            max_cap = max(1, int(max_cap))
+
+        # linear pressure + overload amplification
+        base_penalty = pressure
+        overload = 0 if max_cap == float("inf") else max(0, pressure - max_cap)
+        overload_penalty = overload * overload + overload
+
+        # soft bias by zone type
+        zone_bias = 0
+        if zone.zone_type == "restricted":
+            zone_bias = 1
+        elif zone.zone_type == "priority":
+            zone_bias = -1
+
+        return max(0, base_penalty + overload_penalty + zone_bias)
+
     def _heuristic(self, zone: "Zone", end_zone: "Zone") -> int:
         """
         Admissible heuristic (Manhattan) with minimum step cost = 1.
@@ -272,7 +301,7 @@ class Field:
                 neighbor = connection.get_other_zone(current)
                 if neighbor.zone_type == "blocked":
                     continue
-                penalty = traffic.get(neighbor.name, 0) * 2
+                penalty = self._traffic_penalty(neighbor, traffic)
                 step_cost = self._entry_turn_cost(neighbor) + penalty
                 tentative_g = g + step_cost
                 tentative_neg_prio = neg_prio - (
