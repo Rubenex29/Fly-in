@@ -59,6 +59,7 @@ class Zone:
         self.metadata = metadata
         self.zone_type = zone_type
         self.connections: list[Any] = []
+        self.zone_metadata()
 
     def zone_metadata(self) -> None:
         # i want to set default values for all the metadata keys,
@@ -241,8 +242,8 @@ class Field:
             zone_bias = 1
         elif zone.zone_type == "priority":
             zone_bias = -1
-
-        return max(0, base_penalty + overload_penalty + zone_bias)
+        penalty_result = base_penalty + overload_penalty + zone_bias
+        return max(0, int(penalty_result))
 
     def _heuristic(self, zone: "Zone", end_zone: "Zone") -> int:
         """
@@ -386,36 +387,45 @@ class Field:
                         occupancy[d.current_zone] += 1
 
             # PHASE 4: Execute moves respecting capacity
+            links_used_this_turn: dict[Any, Any] = {}
             for d, next_zone in intents.items():
+                if d.current_zone is None:
+                    continue
+                conn = next(c for c in d.current_zone.connections
+                            if c.get_other_zone(d.current_zone) == next_zone)
+                link_id = tuple(sorted((d.current_zone.name, next_zone.name)))
                 metadata = next_zone.metadata
                 if isinstance(metadata, dict):
                     max_cap = metadata.get("max_drones", 1)
                 else:
                     max_cap = 1
-
-                if occupancy[next_zone] < max_cap:
-                    # Has space: move the drone
-                    occupancy[next_zone] += 1
-                    cost = self._entry_turn_cost(next_zone)
-                    total_cost += cost
-                    d.turns += 1
-                    if cost > 1:  # Restricted zone (2 turns)
-                        d.destination_zone = next_zone
-                        d.turns_to_arrive = cost - 1
-                        if d.current_zone is not None:
-                            connection_name = \
-                                f"{d.current_zone.name}-{next_zone.name}"
-                        moved_this_turn.append(f"D{d.id}-{connection_name}")
-                        d.current_zone = None  # Stays on the connection
-                    else:  # Normal/Priority zone (1 turn)
-                        d.current_zone = next_zone
-                        if d.current_zone == end_zone:
-                            d.finished = True
-                        moved_this_turn.append(f"D{d.id}-{next_zone.name}")
-                else:
-                    # No space: drone fails to move and stays in place
-                    if d.current_zone:
-                        occupancy[d.current_zone] += 1
+                if links_used_this_turn.get(link_id, 0) \
+                   < conn.max_link_capacity:
+                    if occupancy[next_zone] < max_cap:
+                        links_used_this_turn[link_id] = \
+                            links_used_this_turn.get(link_id, 0) + 1
+                        # Has space: move the drone
+                        occupancy[next_zone] += 1
+                        cost = self._entry_turn_cost(next_zone)
+                        total_cost += cost
+                        d.turns += 1
+                        if cost > 1:  # Restricted zone (2 turns)
+                            d.destination_zone = next_zone
+                            d.turns_to_arrive = cost - 1
+                            if d.current_zone is not None:
+                                con_name = \
+                                    f"{d.current_zone.name}-{next_zone.name}"
+                            moved_this_turn.append(f"D{d.id}-{con_name}")
+                            d.current_zone = None  # Stays on the connection
+                        else:  # Normal/Priority zone (1 turn)
+                            d.current_zone = next_zone
+                            if d.current_zone == end_zone:
+                                d.finished = True
+                            moved_this_turn.append(f"D{d.id}-{next_zone.name}")
+                    else:
+                        # No space: drone fails to move and stays in place
+                        if d.current_zone:
+                            occupancy[d.current_zone] += 1
 
             # Print strictly formatted output
             if moved_this_turn:
@@ -432,8 +442,6 @@ class Field:
 try:
     a = Field()
     a.parse_input()
-    for zone in a.zones:
-        zone.zone_metadata()
     a.verify_connection()
     a.simulate_turns()
 except ParserError as e:
