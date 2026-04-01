@@ -22,16 +22,39 @@ class Connection:
     def connection_metadata(self) -> None:
         max_link_capacity = 1
         if self.metadata:
-            for item in self.metadata.split(","):
-                key, value = item.split("=")
-                if key.strip() == "max_link_capacity":
-                    if int(value.strip()) < 1:
-                        raise ParserError("max_link_capacity must" +
-                                          "be at least 1")
-                    max_link_capacity = int(value.strip())
+            for raw_item in self.metadata.split(","):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                if "=" not in item:
+                    raise ParserError("Invalid connection metadata " +
+                                      f"format: '{item}'")
+                key, value = item.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+
+                if not key:
+                    raise ParserError("Connection metadata key "
+                                      "cannot be empty")
+                if not value:
+                    raise ParserError("Missing value for connection " +
+                                      f"metadata key: {key}")
+
+                if key == "max_link_capacity":
+                    try:
+                        parsed = int(value)
+                    except ValueError:
+                        raise ParserError(
+                            "max_link_capacity must be an " +
+                            f"integer, got: {value}"
+                        )
+                    if parsed < 1:
+                        raise ParserError("max_link_capacity must be "
+                                          "at least 1")
+                    max_link_capacity = parsed
                 else:
-                    raise ParserError("Invalid metadata" +
-                                      f"connection key: {key}")
+                    raise ParserError("Invalid connection metadata " +
+                                      f"key: {key}")
         self.max_link_capacity = max_link_capacity
 
     def get_other_zone(self, zone: "Zone") -> "Zone":
@@ -62,31 +85,46 @@ class Zone:
         self.zone_metadata()
 
     def zone_metadata(self) -> None:
-        # i want to set default values for all the metadata keys,
-        # and then override them with the values from the input
-        # warmimg: only 4 types of "zone" are allowed:
-        # normal, blocked, restricted, and priority
-        metadata_dict = {"zone": "normal", "color": "Red", "max_drones": 1}
+        metadata_dict: dict[str, Any] = {"zone": "normal", "color": None,
+                                         "max_drones": 1}
         zone_lst = ["normal", "blocked", "restricted", "priority"]
         if self.metadata:
-            value: Any = None
             if isinstance(self.metadata, str):
-                for item in self.metadata.split(" "):
-                    key, value = item.split("=")
+                for raw_item in self.metadata.split(" "):
+                    item = raw_item.strip()
+                    if not item:
+                        continue
+                    if "=" not in item:
+                        raise ParserError("Invalid zone metadata " +
+                                          f"format: '{item}'")
+                    key, value = item.split("=", 1)
                     key = key.strip()
+                    value = value.strip()
+
+                    if not key:
+                        raise ParserError("Zone metadata key cannot be empty")
+                    if not value:
+                        raise ParserError("Missing value for zone " +
+                                          f"metadata key: {key}")
+
                     if key not in metadata_dict:
                         raise ParserError(f"Invalid metadata key: {key}")
-                    if "zone" in key and value not in zone_lst:
+                    if key == "zone" and value not in zone_lst:
                         raise ParserError(f"Invalid zone type: {value}")
-                    if key.strip() == "max_drones":
-                        value = int(value.strip())
-                        if value < 1:
+                    if key == "max_drones":
+                        try:
+                            new_value = int(value)
+                            metadata_dict[key] = new_value
+                        except ValueError:
+                            raise ParserError(
+                                f"max_drones must be an integer, got: {value}"
+                            )
+                        if new_value < 1:
                             raise ParserError("max_drones must be at least 1")
-                    # remove first char of key
-                    key1 = key[0]
-                    if key1 == "z":
-                        self.zone_type = value.strip()
-                    metadata_dict[key.strip()] = value
+
+                    if key == "zone":
+                        self.zone_type = value
+                        metadata_dict[key] = value
         if self.loc == "end" or self.loc == "start":
             metadata_dict.update({"max_drones": float("inf")})
         self.metadata = metadata_dict
@@ -112,77 +150,117 @@ class Field:
 
     def parse_input(self) -> list[Zone]:
         # Read the input file line by line and build the graph structure.
-        with open("input.txt", "r") as f:
-            if not f:
-                raise ParserError("Input file is empty")
-            for line in f:
-                line = line.strip()
+        nb_drones_seen = False
+        try:
+            with open("input.txt", "r") as f:
+                valid_prefixes = {"nb_drones:", "start_hub:",
+                                  "end_hub:", "hub:", "connection:"}
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or not line:
+                        continue  # skip comments and empty lines
 
-                # Parse and validate the total number of drones.
-                if line.startswith("nb_drones"):
-                    nb_drones = int(line.split()[1])
-                    if nb_drones < 1:
-                        raise ParserError("Number of drones " +
-                                          "must be at least 1")
-                    self.drones = [Drone(i + 1) for i in range(nb_drones)]
+                    # NEW: reject unknown/invalid line starters.
+                    line_start = line.split()[0]
+                    if line_start not in valid_prefixes:
+                        raise ParserError(f"Invalid line start: {line_start}")
 
-                # Parse hub definitions (start, end, and intermediate hubs).
-                if line.startswith("start_hub") \
-                    or line.startswith("end_hub") \
-                        or line.startswith("hub"):
-                    name, x, y = line.split()[1:4]
+                    # Parse and validate the total number of drones.
+                    if line.startswith("nb_drones"):
+                        parts = line.split()
+                        if len(parts) < 2:
+                            raise ParserError("Missing value for " +
+                                              f"nb_drones: {line}")
+                        nb_drones_seen = True
+                        try:
+                            nb_drones = int(parts[1])
+                        except ValueError:
+                            raise ParserError("Invalid value for" +
+                                              f" nb_drones: {parts[1]}")
+                        if nb_drones < 1:
+                            raise ParserError("Number of drones " +
+                                              "must be at least 1")
+                        self.drones = [Drone(i + 1) for i in range(nb_drones)]
 
-                    if " " in name or "-" in name:
-                        raise ParserError("Zone name cannot contain" +
-                                          f"spaces or dashes: {name}")
-                    for z in self.zones:
-                        if z.name == name:
-                            raise ParserError("Duplicate " +
-                                              f"zone name: {name}")
-                    if line.startswith("start_hub"):
-                        loc = "start"
-                    elif line.startswith("end_hub"):
-                        loc = "end"
-                    elif line.startswith("hub"):
-                        loc = "mid"
-                    if line.count("[") == 1 and line.count("]") == 1:
-                        metadata = line.split("[")[1].split("]")[0]
-                    else:
-                        metadata = None
+                    # Parse hub definitions (start, end, and
+                    # intermediate hubs).
+                    if line.startswith("start_hub") \
+                        or line.startswith("end_hub") \
+                            or line.startswith("hub"):
+                        parts = line.split()
 
-                    # Create and register the zone.
-                    self.zones.append(Zone(name, x, y, loc, metadata))
+                        if len(parts) < 4:
+                            raise ParserError("Invalid hub definition (missi" +
+                                              f"ng name, X or Y): {line}")
 
-                # Parse connection definitions and link existing zones.
-                elif line.startswith("connection"):
-                    # connection: start-waypoint1
-                    zone1_name, zone2_name = line.split()[1].split("-")
-                    if line.count("[") == 1 and line.count("]") == 1:
-                        metadata = line.split("[")[1].split("]")[0]
-                    else:
-                        metadata = None
-                    # find the zones with the given names
-                    # and add the connection
-                    zone1 = next((z for z in self.zones
-                                  if z.name == zone1_name), None)
-                    zone2 = next((z for z in self.zones
-                                  if z.name == zone2_name), None)
-                    if not zone1 or not zone2:
-                        raise ParserError("Connection references " +
-                                          f"undefined zone: {line}")
+                        name = parts[1]
+                        try:
+                            x = int(parts[2])
+                            y = int(parts[3])
+                        except ValueError:
+                            raise ParserError("Invalid coordinates for " +
+                                              f"hub: {line}")
+                        if " " in name or "-" in name:
+                            raise ParserError("Zone name cannot contain" +
+                                              f"spaces or dashes: {name}")
+                        for z in self.zones:
+                            if z.name == name:
+                                raise ParserError("Duplicate " +
+                                                  f"zone name: {name}")
+                        if line.startswith("start_hub"):
+                            loc = "start"
+                        elif line.startswith("end_hub"):
+                            loc = "end"
+                        elif line.startswith("hub"):
+                            loc = "mid"
+                        if line.count("[") == 1 and line.count("]") == 1:
+                            metadata = line.split("[")[1].split("]")[0]
+                        else:
+                            metadata = None
 
-                    # Reject duplicated undirected edges.
-                    if any((conn.zone1 == zone1 and conn.zone2 == zone2)
-                           or (conn.zone1 == zone2 and conn.zone2 == zone1)
-                           for conn in zone1.connections):
-                        raise ParserError("Duplicate connection: " +
-                                          f"{zone1_name} - {zone2_name}")
+                        # Create and register the zone.
+                        self.zones.append(Zone(name, x, y, loc, metadata))
 
-                    # Create the connection and attach it to both endpoints.
-                    if zone1 and zone2:
-                        connection = Connection(zone1, zone2, metadata)
-                        zone1.connections.append(connection)
-                        zone2.connections.append(connection)
+                    # Parse connection definitions and link existing zones.
+                    elif line.startswith("connection"):
+                        # connection: start-waypoint1
+                        if "-" not in line:
+                            raise ParserError("Invalid connection format " +
+                                              f"(missing '-'): {line}")
+                        zone1_name, zone2_name = line.split()[1].split("-")
+                        if line.count("[") == 1 and line.count("]") == 1:
+                            metadata = line.split("[")[1].split("]")[0]
+                        else:
+                            metadata = None
+                        # find the zones with the given names
+                        # and add the connection
+                        zone1 = next((z for z in self.zones
+                                      if z.name == zone1_name), None)
+                        zone2 = next((z for z in self.zones
+                                      if z.name == zone2_name), None)
+                        if not zone1 or not zone2:
+                            raise ParserError("Connection references " +
+                                              f"undefined zone: {line}")
+
+                        # Reject duplicated undirected edges.
+                        if any((conn.zone1 == zone1 and conn.zone2 == zone2)
+                               or (conn.zone1 == zone2 and conn.zone2 == zone1)
+                               for conn in zone1.connections):
+                            raise ParserError("Duplicate connection: " +
+                                              f"{zone1_name} - {zone2_name}")
+
+                        # Create the connection and attach
+                        # it to both endpoints.
+                        if zone1 and zone2:
+                            connection = Connection(zone1, zone2, metadata)
+                            zone1.connections.append(connection)
+                            zone2.connections.append(connection)
+
+        except OSError as e:
+            raise ParserError(f"Error opening/reading input file: {e}") from e
+
+        if not nb_drones_seen:
+            raise ParserError("Missing nb_drones definition in input")
 
         return self.zones
 
@@ -193,7 +271,7 @@ class Field:
         start = [z for z in self.zones if z.loc == "start"]
         end = [z for z in self.zones if z.loc == "end"]
         if len(start) != 1 or len(end) != 1:
-            raise ValueError("Must have exactly one start and one end hub")
+            raise ParserError("Must have exactly one start and one end hub")
 
         # Run DFS to confirm at least one traversable path exists.
         visited = set()
@@ -413,7 +491,8 @@ class Field:
             sorted_drones = sorted(
                 [d for d in self.drones if not d.finished
                  and d.current_zone is not None],
-                key=lambda d: self._heuristic(d.current_zone, end_zone),
+                key=lambda d: self._heuristic(d.current_zone, end_zone)
+                if d.current_zone else 0,
                 reverse=False
             )
 
