@@ -478,9 +478,6 @@ class Field:
                         d.current_zone = d.destination_zone
                         # Prevents moving again this turn
                         d.just_arrived = True
-                        if d.current_zone:
-                            moved_this_turn.append(f"D{d.id}-" +
-                                                   f"{d.current_zone.name}")
                         if d.current_zone == end_zone:
                             d.finished = True
 
@@ -552,8 +549,7 @@ class Field:
                     if cost > 1:  # Restricted zone (2 turns)
                         d.destination_zone = next_zone
                         d.turns_to_arrive = cost - 1
-                        con_name = f"{d.current_zone.name}-{next_zone.name}"
-                        moved_this_turn.append(f"D{d.id}-{con_name}")
+                        moved_this_turn.append(f"D{d.id}-{next_zone.name}")
                         d.current_zone = None  # Stays on the connection
                     else:  # Normal/Priority zone (1 turn)
                         d.current_zone = next_zone
