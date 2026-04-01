@@ -66,8 +66,6 @@ class Zone:
         # and then override them with the values from the input
         # warmimg: only 4 types of "zone" are allowed:
         # normal, blocked, restricted, and priority
-        # how can i enforce this? maybe i can raise
-        # an error if the value is not one of these?
         metadata_dict = {"zone": "normal", "color": "Red", "max_drones": 1}
         zone_lst = ["normal", "blocked", "restricted", "priority"]
         if self.metadata:
@@ -113,15 +111,22 @@ class Field:
         self.zones: list[Zone] = []
 
     def parse_input(self) -> list[Zone]:
+        # Read the input file line by line and build the graph structure.
         with open("input.txt", "r") as f:
+            if not f:
+                raise ParserError("Input file is empty")
             for line in f:
                 line = line.strip()
+
+                # Parse and validate the total number of drones.
                 if line.startswith("nb_drones"):
                     nb_drones = int(line.split()[1])
                     if nb_drones < 1:
                         raise ParserError("Number of drones " +
                                           "must be at least 1")
                     self.drones = [Drone(i + 1) for i in range(nb_drones)]
+
+                # Parse hub definitions (start, end, and intermediate hubs).
                 if line.startswith("start_hub") \
                     or line.startswith("end_hub") \
                         or line.startswith("hub"):
@@ -144,7 +149,11 @@ class Field:
                         metadata = line.split("[")[1].split("]")[0]
                     else:
                         metadata = None
+
+                    # Create and register the zone.
                     self.zones.append(Zone(name, x, y, loc, metadata))
+
+                # Parse connection definitions and link existing zones.
                 elif line.startswith("connection"):
                     # connection: start-waypoint1
                     zone1_name, zone2_name = line.split()[1].split("-")
@@ -161,11 +170,15 @@ class Field:
                     if not zone1 or not zone2:
                         raise ParserError("Connection references " +
                                           f"undefined zone: {line}")
+
+                    # Reject duplicated undirected edges.
                     if any((conn.zone1 == zone1 and conn.zone2 == zone2)
                            or (conn.zone1 == zone2 and conn.zone2 == zone1)
                            for conn in zone1.connections):
                         raise ParserError("Duplicate connection: " +
                                           f"{zone1_name} - {zone2_name}")
+
+                    # Create the connection and attach it to both endpoints.
                     if zone1 and zone2:
                         connection = Connection(zone1, zone2, metadata)
                         zone1.connections.append(connection)
@@ -175,10 +188,14 @@ class Field:
 
     def verify_connection(self) -> None:
         # check if we can go from start to end using all connections
+
+        # Locate the unique start and end hubs.
         start = [z for z in self.zones if z.loc == "start"]
         end = [z for z in self.zones if z.loc == "end"]
         if len(start) != 1 or len(end) != 1:
             raise ValueError("Must have exactly one start and one end hub")
+
+        # Run DFS to confirm at least one traversable path exists.
         visited = set()
         stack = [start[0]]
         path = False
@@ -194,6 +211,7 @@ class Field:
                 path = True
                 return
 
+            # Expand valid neighbors (skip blocked zones).
             for connection in current_zone.connections:
                 neighbor = connection.get_other_zone(current_zone)
                 if neighbor.metadata["zone"] == "blocked":
@@ -223,8 +241,10 @@ class Field:
         - escalates sharply when expected demand exceeds capacity
         - biases away from restricted zones and slightly towards priority zones
         """
+        # Read predicted demand for this candidate zone.
         pressure = traffic.get(zone.name, 0)
 
+        # Resolve zone capacity (supports infinite capacity for start/end).
         max_cap: int | float = 1
         if isinstance(zone.metadata, dict):
             max_cap = zone.metadata.get("max_drones", 1)
@@ -239,9 +259,9 @@ class Field:
         # soft bias by zone type
         zone_bias = 0
         if zone.zone_type == "restricted":
-            zone_bias = 1
-        elif zone.zone_type == "priority":
-            zone_bias = -1
+            zone_bias = 2
+
+        # Combine all components into a final non-negative integer penalty.
         penalty_result = base_penalty + overload_penalty + zone_bias
         return max(0, int(penalty_result))
 
@@ -249,6 +269,22 @@ class Field:
         """
         Admissible heuristic (Manhattan) with minimum step cost = 1.
         """
+        # Heuristic = estimated remaining cost
+        # from the current `zone` to the `end_zone`.
+        #
+        # We use Manhattan distance here:
+        # |x1 - x2| + |y1 - y2|
+        #
+        # `abs(value)` means absolute value in Python:
+        # it removes the sign and always returns a non-negative number.
+        # Example: abs(-4) == 4 and abs(4) == 4.
+        #
+        # So this calculation adds the horizontal gap and vertical gap
+        # between two coordinates, regardless of direction.
+        #
+        # In A*, this guides the search toward more promising nodes
+        # without overestimating the real minimum cost
+        # (admissible heuristic), which helps reduce unnecessary exploration.
         return abs(zone.x - end_zone.x) + abs(zone.y - end_zone.y)
 
     def find_shortest_path(
@@ -265,6 +301,7 @@ class Field:
         if start_zone == end_zone:
             return [start_zone]
 
+        # Monotonic counter used for deterministic tie resolution in heap.
         tie = 0
 
         # known costs
@@ -280,6 +317,7 @@ class Field:
         f0 = self._heuristic(start_zone, end_zone)
         heapq.heappush(open_heap, (f0, 0, 0, tie, start_zone))
 
+        # Main A* loop: expand the most promising frontier node first.
         while open_heap:
             f, g, neg_prio, _, current = heapq.heappop(open_heap)
 
@@ -298,10 +336,14 @@ class Field:
                 path.reverse()
                 return path
 
+            # Evaluate each reachable neighbor from the current node.
             for connection in current.connections:
                 neighbor = connection.get_other_zone(current)
                 if neighbor.zone_type == "blocked":
                     continue
+
+                # Compute dynamic transition cost
+                # = base entry + traffic penalty.
                 penalty = self._traffic_penalty(neighbor, traffic)
                 step_cost = self._entry_turn_cost(neighbor) + penalty
                 tentative_g = g + step_cost
@@ -328,6 +370,7 @@ class Field:
         return None
 
     def simulate_turns(self) -> None:
+        # Resolve fixed endpoints used by all drones in the simulation.
         end_zone = next(z for z in self.zones if z.loc == "end")
         start_zone = next(z for z in self.zones if z.loc == "start")
 
@@ -339,6 +382,8 @@ class Field:
         turn = 0
         total_cost = 0
         traffic_count = {z.name: 0 for z in self.zones}
+
+        # Main simulation loop: continue until every drone reaches the end.
         while any(not d.finished for d in self.drones):
             turn += 1
             moved_this_turn = []
@@ -363,7 +408,17 @@ class Field:
 
             # PHASE 2: Movement intents
             intents = {}
-            for d in self.drones:
+
+            # Prioritize drones closer to the goal before assigning intents.
+            sorted_drones = sorted(
+                [d for d in self.drones if not d.finished
+                 and d.current_zone is not None],
+                key=lambda d: self._heuristic(d.current_zone, end_zone),
+                reverse=False
+            )
+
+            # Build movement intents using the current traffic snapshot.
+            for d in sorted_drones:
                 # If finished, flying, or just landed, DO NOT move.
                 if d.finished or d.turns_to_arrive > 0 or d.just_arrived \
                      or d.current_zone is None:
@@ -378,6 +433,8 @@ class Field:
 
             # PHASE 3: Map base occupancy
             occupancy = {z: 0 for z in self.zones}
+
+            # Keep occupancy for drones that are idle this turn.
             for d in self.drones:
                 if d.started and not d.finished and \
                    d.turns_to_arrive == 0 and d.current_zone:
@@ -388,6 +445,9 @@ class Field:
 
             # PHASE 4: Execute moves respecting capacity
             links_used_this_turn: dict[Any, Any] = {}
+
+            # Apply intents only when both link and destination
+            # capacities allow.
             for d, next_zone in intents.items():
                 if d.current_zone is None:
                     continue
@@ -399,33 +459,33 @@ class Field:
                     max_cap = metadata.get("max_drones", 1)
                 else:
                     max_cap = 1
-                if links_used_this_turn.get(link_id, 0) \
-                   < conn.max_link_capacity:
-                    if occupancy[next_zone] < max_cap:
-                        links_used_this_turn[link_id] = \
-                            links_used_this_turn.get(link_id, 0) + 1
-                        # Has space: move the drone
-                        occupancy[next_zone] += 1
-                        cost = self._entry_turn_cost(next_zone)
-                        total_cost += cost
-                        d.turns += 1
-                        if cost > 1:  # Restricted zone (2 turns)
-                            d.destination_zone = next_zone
-                            d.turns_to_arrive = cost - 1
-                            if d.current_zone is not None:
-                                con_name = \
-                                    f"{d.current_zone.name}-{next_zone.name}"
-                            moved_this_turn.append(f"D{d.id}-{con_name}")
-                            d.current_zone = None  # Stays on the connection
-                        else:  # Normal/Priority zone (1 turn)
-                            d.current_zone = next_zone
-                            if d.current_zone == end_zone:
-                                d.finished = True
-                            moved_this_turn.append(f"D{d.id}-{next_zone.name}")
-                    else:
-                        # No space: drone fails to move and stays in place
-                        if d.current_zone:
-                            occupancy[d.current_zone] += 1
+                if (links_used_this_turn.get(link_id, 0) <
+                    conn.max_link_capacity
+                        and occupancy[next_zone] < max_cap):
+
+                    links_used_this_turn[link_id] = \
+                        links_used_this_turn.get(link_id, 0) + 1
+                    occupancy[next_zone] += 1
+                    cost = self._entry_turn_cost(next_zone)
+                    total_cost += cost
+                    d.turns += 1
+
+                    if cost > 1:  # Restricted zone (2 turns)
+                        d.destination_zone = next_zone
+                        d.turns_to_arrive = cost - 1
+                        con_name = f"{d.current_zone.name}-{next_zone.name}"
+                        moved_this_turn.append(f"D{d.id}-{con_name}")
+                        d.current_zone = None  # Stays on the connection
+                    else:  # Normal/Priority zone (1 turn)
+                        d.current_zone = next_zone
+                        if d.current_zone == end_zone:
+                            d.finished = True
+                        moved_this_turn.append(f"D{d.id}-{next_zone.name}")
+                else:
+                    # No space (link or zone full):
+                    # drone fails to move and stays
+                    if d.current_zone:
+                        occupancy[d.current_zone] += 1
 
             # Print strictly formatted output
             if moved_this_turn:
