@@ -55,42 +55,149 @@ The implementation uses a graph-based model:
 - `Drone` objects keep per-drone runtime state.
 - `Field` orchestrates parsing, validation, pathfinding, and simulation.
 
-### Parsing and validation
+## Algorithm Overview
 
-1. Parse hubs and connections from `input.txt`.
-2. Validate schema and metadata values.
-3. Reject invalid maps (duplicate nodes/edges, missing references, invalid capacities, etc.).
-4. Verify at least one traversable route from start to end.
+This project simulates drone movement on a graph of hubs and connections, with capacity constraints and turn-based execution.
 
-### Pathfinding strategy
+### 1. Input parsing and validation
 
-The route search is based on A* (`find_shortest_path`) with:
+The program reads `input.txt` and builds:
 
-- **g-score**: accumulated movement cost,
-- **heuristic**: Manhattan distance,
-- **tie-break rule**: favor paths crossing more priority zones when costs are equal.
+- **Zones (hubs)**: `start`, `end`, and intermediate hubs.
+- **Connections** between zones.
+- **Metadata** for zones and connections, including:
+  - `zone` type (`normal`, `restricted`, `blocked`, `priority`)
+  - `max_drones` (zone capacity)
+  - `max_link_capacity` (connection capacity)
+- **Drones** from `nb_drones`.
 
-Movement cost combines:
+Validation includes:
 
-- base entry cost by zone type (`normal`, `priority`, `restricted`, `blocked`),
-- dynamic traffic penalty (congestion-aware), considering:
-	- current demand for a zone,
-	- zone capacity,
-	- overload escalation,
-	- zone-type bias.
+- exactly one start and one end hub;
+- valid metadata formats and values;
+- no duplicate zone names or duplicate undirected connections;
+- at least one traversable path from start to end (`verify_connection` with DFS).
 
-This strategy reduces naive greedy movement and improves global traffic distribution across turns.
+---
 
-### Turn simulation strategy
+### 2. Pathfinding strategy (A*)
 
-Each turn is processed in phases:
+Each drone plans movement using A* (`find_shortest_path`).
 
-1. Advance drones already in transit.
-2. Compute movement intents from active drones.
-3. Build occupancy map for zones.
-4. Execute moves only if capacity rules are respected.
+#### Cost model
 
-This phased approach avoids inconsistent states and makes capacity handling deterministic.
+For a candidate neighbor zone:
+
+- `step_cost = entry_cost + traffic_penalty`
+- `entry_cost`:
+  - `normal` / `priority`: `1`
+  - `restricted`: `2`
+  - `blocked`: effectively impossible (`10**9`)
+
+#### Traffic penalty
+
+`_traffic_penalty(zone, traffic)` uses predicted demand (`pressure`) for that zone:
+
+- `pressure` is the number of drones currently intending to enter that zone in the current planning phase;
+- penalty grows with pressure and grows faster when pressure exceeds capacity (`max_drones`);
+- restricted zones receive an additional bias penalty.
+
+`pressure` can be greater than `max_drones` because multiple drones may intend the same destination before hard capacity checks are applied.
+
+#### Heuristic
+
+A* uses Manhattan distance:
+
+`h(n) = |x_n - x_end| + |y_n - y_end|`
+
+with total priority key:
+
+`f(n) = g(n) + h(n)`
+
+---
+
+### 3. Priority and tie-breaking in A*
+
+The open set stores tuples:
+
+`(f, g, neg_prio, tie, zone)`
+
+Heap ordering in Python is lexicographic, so the expansion order is:
+
+1. lower `f`
+2. then lower `g`
+3. then lower `neg_prio` (more priority zones visited is better)
+4. then lower `tie` (deterministic insertion order)
+
+Although `f` may not be used later in expressions, it is actively used by `heapq` to choose which node is popped first.
+
+---
+
+### 4. Why stale-entry checks are required
+
+Because `heapq` does not support in-place key decrease, improved states are pushed as new entries.  
+Older entries for the same zone remain in the heap.
+
+The checks:
+
+- `if g != g_score[current]: continue`
+- `if neg_prio != neg_prio_score[current]: continue`
+
+discard outdated entries when they are popped later.
+
+So the algorithm does **not** remove bad entries immediately; it ignores them safely when they reach the top.
+
+---
+
+### 5. Meaning of A* score tables
+
+- `g_score[zone]`: best known real cost from start to `zone`.
+- `neg_prio_score[zone]`: best known secondary score (priority preference).
+- `g`, `neg_prio` popped from heap: values of the specific candidate state currently being evaluated.
+
+For a first-time-discovered neighbor:
+
+- `old_g` and `old_neg_prio` default to infinity (`dict.get(..., inf)`),
+- so the new candidate is accepted.
+
+---
+
+### 6. Turn simulation and hard constraints
+
+Simulation (`simulate_turns`) runs in turns with four phases:
+
+1. advance in-transit drones;
+2. build intents using A*;
+3. compute current occupancy;
+4. execute allowed moves.
+
+Important distinction:
+
+- A* and penalties are **soft guidance** (planning preference).
+- Capacity checks in phase 4 are **hard rules**:
+  - connection limit: `max_link_capacity`
+  - zone limit: `max_drones`
+
+Therefore, multiple drones may intend the same destination, but only allowed moves are committed.
+
+---
+
+### 7. Scope of traffic prediction
+
+`traffic_count` is used as a per-turn prediction signal during intent generation.  
+It represents immediate expected pressure, not a full future global traffic forecast across all subsequent turns.
+
+For observability, reset timing matters:
+
+- if reset before printing, printed values appear as zeros;
+- reset should be positioned consistently with intended debug output.
+
+---
+
+### 8. Determinism notes
+
+When costs are equal, outcome depends on deterministic tie-breaking (`tie`) and insertion order.  
+This prevents unstable behavior between runs with identical input.
 
 ## Visual Representation
 
@@ -131,3 +238,172 @@ AI was used to support algorithm-oriented development tasks, mainly:
 - reviewing code clarity and documentation wording.
 
 In this project, AI assistance was specifically used in the implemented algorithmic parts (pathfinding and movement-cost logic), while final integration and validation decisions remained manual.
+
+## Detailed Control Flow (Loops and Conditions)
+
+This section explains the practical meaning of each major loop and condition in the algorithm.
+
+### A) Connectivity validation (`verify_connection`)
+
+The code performs a DFS from `start` to ensure `end` is reachable.
+
+#### Main loop
+- `while stack:`  
+  Continues while there are zones left to explore.
+
+#### Per-node logic
+- `current_zone = stack.pop()`  
+  Takes one zone from the stack.
+
+- `if current_zone in visited: continue`  
+  If already explored, skip it.  
+  This prevents repeated work and avoids infinite loops in cyclic graphs.
+
+- `visited.add(current_zone)`  
+  Marks zone as explored.
+
+- `if current_zone == end[0]: return`  
+  If end is reached, connectivity is confirmed.
+
+#### Neighbor expansion
+- For each connection from `current_zone`, obtain `neighbor`.
+- `if neighbor.metadata["zone"] == "blocked": continue`  
+  Blocked zones are not traversable for connectivity purposes.
+- Otherwise, push neighbor into `stack`.
+
+If DFS finishes without finding end, parser raises:
+- `ParserError("No valid path from start to end")`.
+
+---
+
+### B) A* pathfinding (`find_shortest_path`)
+
+A* finds a low-cost path considering:
+- entry cost by zone type,
+- dynamic traffic penalty,
+- heuristic distance to goal.
+
+#### Main frontier loop
+- `while open_heap:`  
+  Process candidate zones ordered by `(f, g, neg_prio, tie, zone)`.
+
+- `f, g, neg_prio, _, current = heapq.heappop(open_heap)`  
+  Retrieves the current best candidate by heap order.
+
+#### Stale-entry filtering
+- `if g != g_score.get(current, inf): continue`
+- `if neg_prio != neg_prio_score.get(current, inf): continue`
+
+These conditions skip outdated heap entries.  
+Reason: Python `heapq` does not decrease priority in place; better states are pushed again, old ones remain and must be ignored when popped.
+
+#### Goal check
+- `if current == end_zone:` reconstruct and return path.
+
+#### Neighbor loop
+- `for connection in current.connections:` evaluates each adjacent zone.
+
+- `if neighbor.zone_type == "blocked": continue`  
+  Blocked zones are excluded from A* expansion.
+
+- Compute candidate scores:
+  - `tentative_g = g + step_cost`
+  - `tentative_neg_prio = neg_prio - 1` if neighbor is `priority`, else unchanged.
+
+- Read previous best:
+  - `old_g = g_score.get(neighbor, inf)`
+  - `old_neg_prio = neg_prio_score.get(neighbor, inf)`
+
+#### Improvement condition
+- `if (tentative_g, tentative_neg_prio) < (old_g, old_neg_prio):`
+  Update only if:
+  1. lower real cost `g`, or
+  2. same `g` but better priority tie-break (`neg_prio` lower).
+
+If true, algorithm updates:
+- `came_from[neighbor]`
+- `g_score[neighbor]`
+- `neg_prio_score[neighbor]`
+- pushes a new heap entry with updated `f`.
+
+If heap empties with no goal, returns `None`.
+
+---
+
+### C) Turn simulation (`simulate_turns`)
+
+The simulation runs until all drones finish.
+
+#### Global loop
+- `while any(not d.finished for d in self.drones):`
+  Continue while at least one drone is unfinished.
+
+---
+
+#### Phase 1: advance drones already in transit
+- For each drone:
+  - `if d.turns_to_arrive > 0:` decrement remaining travel turns.
+  - When reaches zero:
+    - assign `current_zone = destination_zone`,
+    - set `just_arrived = True` (cannot move again this same turn),
+    - if end reached: `finished = True`.
+
+---
+
+#### Phase 2: build movement intents
+- Drones are sorted by heuristic distance to end (closer first).
+- Per drone, skip intent generation if:
+  - `d.finished` (already done),
+  - `d.turns_to_arrive > 0` (still flying),
+  - `d.just_arrived` (landed this turn),
+  - `d.current_zone is None` (currently on link / no zone).
+
+- If valid:
+  - run A* from current zone to end using current traffic snapshot,
+  - if path exists and has next step, register intent for `next_zone`,
+  - increase `traffic_count[next_zone.name]` as predicted pressure.
+
+---
+
+#### Phase 3: base occupancy map
+- Initialize `occupancy` for all zones.
+- For drones that remain stationary this turn (`d not in intents`), increment occupancy of their current zone.
+- This models space already occupied before new movements are accepted.
+
+---
+
+#### Phase 4: apply intents with hard constraints
+For each `(drone, next_zone)` intent:
+- Find the corresponding connection and link id.
+- Read destination capacity (`max_drones`).
+
+Movement is allowed only if both conditions hold:
+1. link usage this turn `< conn.max_link_capacity`
+2. destination occupancy `< max_drones`
+
+If both pass:
+- consume link slot,
+- increase destination occupancy,
+- add movement cost,
+- update drone state:
+  - restricted (`cost > 1`): drone stays in transit (`current_zone = None`, `turns_to_arrive > 0`)
+  - normal/priority (`cost == 1`): immediate arrival to `next_zone`.
+
+If condition fails:
+- drone does not move and remains occupying its current zone.
+
+---
+
+### D) Practical meaning of “already visited zone”
+
+There are two “already seen” notions in the project:
+
+1. **DFS (`verify_connection`)**  
+   `if current_zone in visited: continue`  
+   Means: zone already fully explored for connectivity check.
+
+2. **A* (`find_shortest_path`)**  
+   A zone may appear multiple times in heap via different paths.  
+   The stale-entry checks skip older, worse versions of the same zone state.
+
+Both mechanisms prevent redundant processing and keep search behavior correct.
